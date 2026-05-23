@@ -1,0 +1,11 @@
+## .NET / Visual Studio
+bin/
+obj/
+*.user
+*.suo
+.vs/
+artifacts/
+TestResults/
+*.nupkg
+[Dd]ebug/
+[Rr]elease/

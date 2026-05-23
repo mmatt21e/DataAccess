@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>ScaleManagement.Domain</RootNamespace>
+    <AssemblyName>ScaleManagement.Domain</AssemblyName>
+  </PropertyGroup>
+
+  <!--
+    The Domain project is intentionally free of infrastructure dependencies
+    (no Entity Framework, no provider packages). It contains only POCO entity
+    models, enums, abstractions and repository contracts. This keeps the
+    business model persistence-ignorant and trivially unit-testable.
+  -->
+
+</Project>
