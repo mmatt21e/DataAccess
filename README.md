@@ -9,6 +9,225 @@ no code changes.
 
 ---
 
+## Contents
+
+- [Getting started — using it in your project](#getting-started--using-it-in-your-project)
+  - [1. Reference the projects](#1-reference-the-projects)
+  - [2. Choose an EF Core provider](#2-choose-an-ef-core-provider)
+  - [3. Register the data access layer](#3-register-the-data-access-layer)
+  - [4. Supply the tenant context](#4-supply-the-tenant-context)
+  - [5. Create / migrate the database](#5-create--migrate-the-database)
+  - [6. Seed a tenant and enable its modules](#6-seed-a-tenant-and-enable-its-modules)
+  - [7. Read and write data](#7-read-and-write-data)
+  - [8. Turn on auditing](#8-turn-on-auditing)
+- [Solution layout](#solution-layout)
+- [Entity model](#entity-model)
+- [How the key requirements are met](#how-the-key-requirements-are-met)
+- [Reference](#reference): [Database initialization](#database-initialization-existence-check--creation) · [Migrations](#migrations) · [Design notes](#design-notes--trade-offs)
+
+---
+
+## Getting started — using it in your project
+
+A complete walkthrough from a clean app to reading/writing weighing data. The
+examples assume SQL Server and ASP.NET Core, with notes for console/worker apps.
+
+> **Namespaces used below**
+> ```csharp
+> using ScaleManagement.Infrastructure;            // AddScaleManagementDataAccess, InitializeScaleManagementDatabaseAsync
+> using ScaleManagement.Infrastructure.Persistence; // ScaleManagementDbContext, DatabaseInitializationOptions
+> using ScaleManagement.Infrastructure.Tenancy;      // AmbientTenantContext
+> using ScaleManagement.Domain.Repositories;         // IUnitOfWork, repository interfaces
+> using ScaleManagement.Domain.Entities;             // Tenant, Scale, Transaction, …
+> using ScaleManagement.Domain.Enums;                // ScaleType, MeasurementType, …
+> using Microsoft.EntityFrameworkCore;               // UseSqlServer, etc.
+> ```
+
+### 1. Reference the projects
+
+Add both projects to your solution and reference **Infrastructure** from your
+application (it transitively pulls in Domain):
+
+```bash
+dotnet sln add src/ScaleManagement.Domain/ScaleManagement.Domain.csproj
+dotnet sln add src/ScaleManagement.Infrastructure/ScaleManagement.Infrastructure.csproj
+
+# from your web/console project:
+dotnet add reference path/to/src/ScaleManagement.Infrastructure/ScaleManagement.Infrastructure.csproj
+```
+
+### 2. Choose an EF Core provider
+
+The Infrastructure project already references the **SQL Server** provider, so no
+extra package is needed for SQL Server. To use a different database, add its
+provider package to your application project and call the matching `Use…` method
+in step 3 — e.g. `dotnet add package Npgsql.EntityFrameworkCore.PostgreSQL`
+then `options.UseNpgsql(connectionString)`.
+
+Put the connection string in `appsettings.json`:
+
+```jsonc
+{
+  "ConnectionStrings": {
+    "ScaleManagement": "Server=localhost;Database=ScaleManagement;Trusted_Connection=True;TrustServerCertificate=True"
+  }
+}
+```
+
+### 3. Register the data access layer
+
+One call registers the `DbContext`, all repositories, the unit of work, the
+tenant context, the auditing pipeline and the database initializer. In a minimal
+ASP.NET Core `Program.cs`:
+
+```csharp
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddScaleManagementDataAccess(
+    options => options.UseSqlServer(
+        builder.Configuration.GetConnectionString("ScaleManagement")),
+    init =>
+    {
+        init.CreateIfNotExists = true;       // create the DB on first run
+        init.UseMigrations = true;           // use EF migrations (recommended)
+        init.ApplyPendingMigrations = true;  // auto-upgrade an existing DB
+    });
+
+// your own services, controllers, auth, etc.
+builder.Services.AddControllers();
+
+var app = builder.Build();
+```
+
+The second argument is optional — `AddScaleManagementDataAccess(o => o.UseSqlServer(cs))`
+works on its own and uses the defaults shown above.
+
+### 4. Supply the tenant context
+
+Every tenant-scoped read/write needs to know the current tenant. The library
+registers a scoped `AmbientTenantContext`; set it once per request **after
+authentication** so queries are filtered and `TenantId`/audit fields are stamped
+automatically:
+
+```csharp
+app.UseAuthentication();
+app.UseAuthorization();
+
+app.Use(async (httpContext, next) =>
+{
+    var tenantClaim = httpContext.User.FindFirst("tenant_id")?.Value;
+    if (Guid.TryParse(tenantClaim, out var tenantId))
+    {
+        httpContext.RequestServices
+            .GetRequiredService<AmbientTenantContext>()
+            .Set(
+                tenantId,
+                userId: httpContext.User.FindFirst(ClaimTypes.NameIdentifier)?.Value,
+                userName: httpContext.User.Identity?.Name,
+                correlationId: httpContext.TraceIdentifier);
+    }
+
+    await next();
+});
+
+app.MapControllers();
+app.Run();
+```
+
+Prefer to integrate with `HttpContext` directly? Implement your own
+`ITenantContext` and register it **before** `AddScaleManagementDataAccess` — the
+library uses `TryAdd`, so your registration wins.
+
+### 5. Create / migrate the database
+
+Run the initializer once at startup; it checks whether the database exists and
+creates/migrates it per the options from step 3:
+
+```csharp
+var app = builder.Build();
+
+var result = await app.Services.InitializeScaleManagementDatabaseAsync();
+// result.DatabaseAlreadyExisted, result.DatabaseCreated, result.AppliedMigrations
+```
+
+For production, generate a migration first so the schema is created via
+migrations (see [Migrations](#migrations)). Without migrations the initializer
+falls back to `EnsureCreated()`.
+
+### 6. Seed a tenant and enable its modules
+
+`Tenant` and `TenantModule` are **not** tenant-scoped, so create them with **no
+tenant set** (the global filter is then inert). Enable only the scale
+technologies the customer has licensed:
+
+```csharp
+using var scope = app.Services.CreateScope();
+var db = scope.ServiceProvider.GetRequiredService<ScaleManagementDbContext>();
+
+var tenant = new Tenant { Name = "Acme Aggregates", Code = "acme", TimeZoneId = "America/Chicago" };
+db.Tenants.Add(tenant);
+
+db.TenantModules.Add(new TenantModule { TenantId = tenant.Id, ScaleType = ScaleType.TruckScale,  IsEnabled = true });
+db.TenantModules.Add(new TenantModule { TenantId = tenant.Id, ScaleType = ScaleType.HopperScale, IsEnabled = true });
+
+await db.SaveChangesAsync();
+```
+
+> To create tenant-scoped data (scales, materials, trucks, transactions…) from a
+> background job, first set the tenant on the scope:
+> ```csharp
+> scope.ServiceProvider.GetRequiredService<AmbientTenantContext>()
+>     .Set(tenant.Id, userId: "system", userName: "Seeder");
+> ```
+> `TenantId` is then stamped automatically — never set it by hand on scoped rows.
+
+### 7. Read and write data
+
+Inject `IUnitOfWork` (for multi-entity/atomic work) or a single repository
+interface anywhere in your app:
+
+```csharp
+public sealed class WeighingService
+{
+    private readonly IUnitOfWork _uow;
+
+    public WeighingService(IUnitOfWork uow) => _uow = uow;
+
+    public async Task<Guid> RegisterTruckScaleAsync(string code, string name, CancellationToken ct)
+    {
+        var scale = new Scale
+        {
+            Code = code,
+            Name = name,
+            ScaleType = ScaleType.TruckScale,
+            WeighingMode = WeighingMode.TwoPass,
+            Capacity = 80_000m,
+            DefaultUnit = UnitOfMeasure.Kilogram,
+        };
+
+        await _uow.Scales.AddAsync(scale, ct);
+        await _uow.SaveChangesAsync(ct);   // TenantId + provenance stamped here
+        return scale.Id;
+    }
+}
+```
+
+Register your service and you're done:
+
+```csharp
+builder.Services.AddScoped<WeighingService>();
+```
+
+See the fuller weigh-out example under [Usage example](#usage-example), which
+shows capturing measurements and using the open-transaction lookups.
+
+### 8. Turn on auditing
+
+Auditing is off until you add an `AuditConfiguration` row for an entity. See
+[Enabling auditing for an entity](#enabling-auditing-for-an-entity).
+
+---
+
 ## Solution layout
 
 ```
@@ -137,7 +356,12 @@ ordered deliberately (stamp → snapshot → soft-delete rewrite).
 
 ---
 
-## Registration
+## Reference
+
+The sections below are reference detail for the topics introduced in
+[Getting started](#getting-started--using-it-in-your-project).
+
+### Registration
 
 ```csharp
 services.AddScaleManagementDataAccess(options =>
@@ -156,7 +380,7 @@ ctx.Set(tenantId, userId, userName, correlationId);
 calling `AddScaleManagementDataAccess` — it uses `TryAdd`, so your registration
 wins.
 
-## Database initialization (existence check & creation)
+### Database initialization (existence check & creation)
 
 The layer can check whether its database exists and create it on startup. An
 `IDatabaseInitializer` is registered automatically; configure its behaviour via
@@ -199,7 +423,7 @@ Behaviour:
 "Given the correct information" means the configured connection string must
 target a server the process is permitted to create databases on.
 
-## Usage example
+### Usage example
 
 ```csharp
 public async Task<Guid> WeighOutAsync(IUnitOfWork uow, Guid scaleId, Guid truckId, CancellationToken ct)
@@ -234,7 +458,7 @@ public async Task<Guid> WeighOutAsync(IUnitOfWork uow, Guid scaleId, Guid truckI
 }
 ```
 
-## Migrations
+### Migrations
 
 A `DesignTimeDbContextFactory` is provided so the EF tools work without the app
 host. Set the connection string via `SCALEMANAGEMENT_CONNECTION`, then:
@@ -246,7 +470,7 @@ dotnet ef migrations add InitialCreate \
 dotnet ef database update --project src/ScaleManagement.Infrastructure
 ```
 
-## Enabling auditing for an entity
+### Enabling auditing for an entity
 
 Insert an `AuditConfiguration` row (global default shown; set `TenantId` for a
 tenant-specific override):
