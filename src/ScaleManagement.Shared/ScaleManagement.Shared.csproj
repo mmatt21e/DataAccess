@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>ScaleManagement.Shared</RootNamespace>
+    <AssemblyName>ScaleManagement.Shared</AssemblyName>
+  </PropertyGroup>
+
+  <!--
+    Cross-cutting building blocks shared by Core, Reporting and the feature
+    modules: value objects, unit conversion, the Result vocabulary, guards and
+    time helpers. Sits *above* the dependency-free DAL: it references Domain
+    (for the unit/enum types) but nothing infrastructural, so it stays trivially
+    testable and free of any persistence or web concerns.
+  -->
+  <ItemGroup>
+    <ProjectReference Include="..\ScaleManagement.Domain\ScaleManagement.Domain.csproj" />
+  </ItemGroup>
+
+</Project>

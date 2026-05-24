@@ -64,6 +64,11 @@ public class Transaction : TenantEntityBase
     public string? ReferenceNumber { get; set; }
     public string? Notes { get; set; }
 
+    // --- Void provenance (populated when Status becomes Voided) ---
+    public Guid? VoidedByUserId { get; set; }
+    public DateTimeOffset? VoidedAtUtc { get; set; }
+    public string? VoidReason { get; set; }
+
     /// <summary>All readings captured for this weighment, of any measurement type.</summary>
     public ICollection<TransactionMeasurement> Measurements { get; set; } = new List<TransactionMeasurement>();
 }
