@@ -156,6 +156,49 @@ ctx.Set(tenantId, userId, userName, correlationId);
 calling `AddScaleManagementDataAccess` — it uses `TryAdd`, so your registration
 wins.
 
+## Database initialization (existence check & creation)
+
+The layer can check whether its database exists and create it on startup. An
+`IDatabaseInitializer` is registered automatically; configure its behaviour via
+the optional second argument:
+
+```csharp
+services.AddScaleManagementDataAccess(
+    options => options.UseSqlServer(connectionString),
+    init =>
+    {
+        init.CreateIfNotExists = true;       // create the DB if missing (default)
+        init.UseMigrations = true;           // create/upgrade via EF migrations (default)
+        init.ApplyPendingMigrations = true;  // apply pending migrations to an existing DB (default)
+    });
+```
+
+Then run it once at startup:
+
+```csharp
+var result = await app.Services.InitializeScaleManagementDatabaseAsync();
+// result.DatabaseAlreadyExisted / result.DatabaseCreated / result.AppliedMigrations
+```
+
+You can also inject `IDatabaseInitializer` and call `DatabaseExistsAsync()` /
+`InitializeAsync()` directly.
+
+Behaviour:
+
+- **Exists check** uses the provider's `IRelationalDatabaseCreator`, so it
+  distinguishes "database missing" from "cannot connect".
+- **`UseMigrations = true`** creates/upgrades through `Database.Migrate()`. If no
+  migrations exist in the assembly yet, it transparently falls back to
+  `EnsureCreated()` so a usable schema is still produced.
+- **`UseMigrations = false`** always builds the schema from the model with
+  `EnsureCreated()` — convenient for tests/prototypes, but not upgradable with
+  migrations later.
+- **`CreateIfNotExists = false`** turns off creation entirely; the initializer
+  only reports existence.
+
+"Given the correct information" means the configured connection string must
+target a server the process is permitted to create databases on.
+
 ## Usage example
 
 ```csharp

@@ -1,6 +1,8 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using ScaleManagement.Domain.Abstractions;
 using ScaleManagement.Domain.Repositories;
 using ScaleManagement.Infrastructure.Auditing;
@@ -23,13 +25,29 @@ namespace ScaleManagement.Infrastructure;
 /// </summary>
 public static class DependencyInjection
 {
+    /// <param name="configureDbContext">Provider/connection configuration (e.g. <c>options.UseSqlServer(...)</c>).</param>
+    /// <param name="configureInitialization">
+    /// Optional database-initialization settings. When supplied (or left at its
+    /// defaults), an <see cref="IDatabaseInitializer"/> is registered that can
+    /// check for the database and create it. Call
+    /// <see cref="InitializeScaleManagementDatabaseAsync"/> at startup to run it.
+    /// </param>
     public static IServiceCollection AddScaleManagementDataAccess(
         this IServiceCollection services,
-        Action<DbContextOptionsBuilder> configureDbContext)
+        Action<DbContextOptionsBuilder> configureDbContext,
+        Action<DatabaseInitializationOptions>? configureInitialization = null)
     {
         ArgumentNullException.ThrowIfNull(configureDbContext);
 
         services.AddMemoryCache();
+
+        var initializationOptions = new DatabaseInitializationOptions();
+        configureInitialization?.Invoke(initializationOptions);
+        services.TryAddSingleton(initializationOptions);
+        services.AddScoped<IDatabaseInitializer>(sp => new DatabaseInitializer(
+            sp.GetRequiredService<ScaleManagementDbContext>(),
+            sp.GetRequiredService<DatabaseInitializationOptions>(),
+            sp.GetService<ILogger<DatabaseInitializer>>() ?? NullLogger<DatabaseInitializer>.Instance));
 
         // Ambient context + clock. TryAdd lets a host override with its own
         // (e.g. an HttpContext-backed tenant context) before calling this.
@@ -68,5 +86,21 @@ public static class DependencyInjection
         services.AddScoped<IAuditLogRepository, AuditLogRepository>();
 
         services.AddScoped<IUnitOfWork, UnitOfWork>();
+    }
+
+    /// <summary>
+    /// Runs database initialization (existence check + optional create/migrate) in
+    /// a fresh scope. Call this once at host startup, for example:
+    /// <code>
+    /// var result = await app.Services.InitializeScaleManagementDatabaseAsync();
+    /// </code>
+    /// </summary>
+    public static async Task<DatabaseInitializationResult> InitializeScaleManagementDatabaseAsync(
+        this IServiceProvider services,
+        CancellationToken cancellationToken = default)
+    {
+        await using var scope = services.CreateAsyncScope();
+        var initializer = scope.ServiceProvider.GetRequiredService<IDatabaseInitializer>();
+        return await initializer.InitializeAsync(cancellationToken);
     }
 }
